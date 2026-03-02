@@ -1,0 +1,19 @@
+# Local secrets
+.env
+
+# Python env/cache
+.venv/
+__pycache__/
+*.pyc
+
+# Generated migration artifacts (can contain business SQL and data metadata)
+artifacts/
+
+# Generated load files can embed DB credentials
+config/*.load
+config/mssql_to_pg.load
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/*.log
