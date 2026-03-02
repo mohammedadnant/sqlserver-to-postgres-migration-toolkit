@@ -145,6 +145,18 @@ This toolkit handles most migration plumbing, but some SQL Server patterns still
 - advanced transaction/error behavior differences,
 - SQL Server-only features with no direct PostgreSQL equivalent.
 
+Large-scale data migration considerations:
+- Default settings are tuned for practical local/dev migration, not maximum billion-row throughput.
+- For very large databases, additional tuning is typically required (workers, batch sizing, infrastructure sizing, indexing strategy, cutover planning).
+
+Schema parity considerations:
+- Primary keys, indexes, sequences, and foreign keys are migrated by `pgloader` in most common cases.
+- Some SQL Server-specific index/constraint behaviors may not map 1:1 and should be verified post-migration.
+
+Future development:
+- Add a dedicated "large database mode" profile for high-volume migrations.
+- Add an automated index/foreign-key/constraint parity verification report between SQL Server and PostgreSQL.
+
 For production usage, always run integration/business tests after migration.
 
 ## Troubleshooting
