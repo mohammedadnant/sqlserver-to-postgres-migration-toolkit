@@ -82,11 +82,43 @@ Fresh full run (recommended):
 ./scripts/run-from-scratch.ps1
 ```
 
+Fresh full run with optional AI shell enhancement:
+
+```powershell
+./scripts/run-from-scratch.ps1 -EnableAiShellEnhancement
+```
+
 Full run without reset:
 
 ```powershell
 ./scripts/run-all.ps1
 ```
+
+Full run without reset + AI shell enhancement:
+
+```powershell
+./scripts/run-all.ps1 -EnableAiShellEnhancement
+```
+
+## Effective execution order
+
+`run-all.ps1` executes the pipeline in this order:
+
+1. `00-check-prereqs.ps1`
+2. `02-create-postgres-db.ps1`
+3. `03-export-sqlserver-tables.ps1`
+4. `04-extract-sqlserver-objects.ps1`
+5. `05-run-pgloader.ps1`
+6. `06-convert-objects.ps1`
+7. `bulk_convert_upsert_shells.py` (deterministic post-pass for Upsert shell procedures)
+8. `enhance_shell_procedures.py` (optional, only with `-EnableAiShellEnhancement`)
+9. `07-apply-converted-objects.ps1`
+10. `08-validate-row-counts.ps1`
+
+`run-from-scratch.ps1` runs:
+
+1. `00-reset-state.ps1`
+2. `run-all.ps1` (sequence above)
 
 ## Pipeline scripts (all .ps1 files)
 
@@ -109,6 +141,13 @@ Full run without reset:
 ./scripts/run-from-scratch.ps1
 ```
 
+Deterministic / AI helper scripts used by the pipeline:
+
+```powershell
+python ./scripts/bulk_convert_upsert_shells.py --root .
+python ./scripts/enhance_shell_procedures.py --root .
+```
+
 ## Script reference
 
 - `00-check-prereqs.ps1`: validates required tools and runtime dependencies.
@@ -118,6 +157,8 @@ Full run without reset:
 - `04-extract-sqlserver-objects.ps1`: extracts views/procedures/functions/triggers.
 - `05-run-pgloader.ps1`: migrates schema + tables + data using `pgloader`.
 - `06-convert-objects.ps1`: orchestrates programmable-object conversion.
+- `bulk_convert_upsert_shells.py`: deterministic post-pass that rewrites `Upsert_*` shell procedures with deployable PL/pgSQL logic.
+- `enhance_shell_procedures.py`: optional local-AI pass to rewrite remaining shell procedures.
 - `06a-convert-views-manual.ps1`: deterministic/manual-rule view conversion.
 - `06b-convert-procedures-manual.ps1`: deterministic/manual-rule procedure conversion.
 - `06c-convert-functions-manual.ps1`: deterministic/manual-rule function conversion.
@@ -135,6 +176,8 @@ Helper scripts:
 - `artifacts/row_count_report.csv`
 - `artifacts/converted_objects/**/*.sql`
 - `artifacts/object_apply_failures.csv` (if generated)
+- `artifacts/upsert_shell_parse_failures.txt` (generated when deterministic Upsert parser cannot process some files)
+- `artifacts/upsert_shell_conversion_summary.txt` (latest deterministic Upsert conversion summary)
 
 ## Known limitations
 
@@ -167,6 +210,15 @@ For production usage, always run integration/business tests after migration.
 ```powershell
 ./scripts/07-apply-converted-objects.ps1 -RetryKnownFailures
 ```
+
+- If deterministic Upsert post-pass reports parse failures, inspect:
+
+```powershell
+Get-Content ./artifacts/upsert_shell_parse_failures.txt
+Get-Content ./artifacts/upsert_shell_conversion_summary.txt
+```
+
+Then manually convert those listed procedures or run optional AI enhancement mode.
 
 ## Contributing
 
