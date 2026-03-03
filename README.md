@@ -26,9 +26,27 @@ Database migration is usually split between bulk data tools and manual object re
 
 The successful default pipeline is deterministic (PowerShell + `pgloader` + rule-based conversion).
 
+No GitHub Copilot is required.
+If you want the full run including local PhiMini enhancement, run:
+
+```powershell
+./scripts/run-from-scratch.ps1 -EnableAiShellEnhancement
+```
+
+If you want deterministic-only mode (no AI step), run:
+
+```powershell
+./scripts/run-from-scratch.ps1
+```
+
+Both commands use only local scripts/tools. The AI-enhanced path uses your local Foundry-compatible endpoint.
+
 Optional LLM enhancement is available in `09-enhance-and-publish.ps1`:
 - `-Mode Chat`: creates a manual enhancement queue.
 - `-Mode PhiMini`: attempts automated rewrite through a local Foundry-compatible model endpoint.
+
+`09-enhance-and-publish.ps1` now runs a deterministic Upsert repair pass first for failed `Upsert_*` procedures, then applies Foundry enhancement for remaining failures.
+For known persistent cases, `enhance_with_phi_mini.py` includes deterministic fallback generators when Foundry returns incomplete/truncated SQL.
 
 Use LLM mode as an accelerator, not a guarantee.
 
@@ -159,6 +177,7 @@ python ./scripts/enhance_shell_procedures.py --root .
 - `06-convert-objects.ps1`: orchestrates programmable-object conversion.
 - `bulk_convert_upsert_shells.py`: deterministic post-pass that rewrites `Upsert_*` shell procedures with deployable PL/pgSQL logic.
 - `enhance_shell_procedures.py`: optional local-AI pass to rewrite remaining shell procedures.
+- `enhance_with_phi_mini.py`: Foundry-local enhancer with SQL-output validation, retries, and deterministic fallback for specific persistent failures.
 - `06a-convert-views-manual.ps1`: deterministic/manual-rule view conversion.
 - `06b-convert-procedures-manual.ps1`: deterministic/manual-rule procedure conversion.
 - `06c-convert-functions-manual.ps1`: deterministic/manual-rule function conversion.
@@ -219,6 +238,9 @@ Get-Content ./artifacts/upsert_shell_conversion_summary.txt
 ```
 
 Then manually convert those listed procedures or run optional AI enhancement mode.
+
+- If `upsert_shell_conversion_summary.txt` shows `parse_failures=0` but apply failures still exist, check `artifacts/object_apply_failures.csv`.
+	The Upsert summary reports parser-stage status only; final deploy status comes from apply artifacts.
 
 ## Contributing
 

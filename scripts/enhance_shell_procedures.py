@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from enhance_with_phi_mini import try_foundry_generate
+from enhance_with_phi_mini import _extract_sql_only, _looks_like_deployable_sql, try_foundry_generate
 
 
 SHELL_MARKER = "converted to deployable shell; manual logic porting required."
@@ -14,7 +14,8 @@ def build_prompt(source_sql: str, converted_sql: str, file_name: str) -> str:
         "You are a senior SQL migration engineer. Convert this SQL Server stored procedure to PostgreSQL PL/pgSQL.\n"
         "Requirements:\n"
         "- Preserve business logic and result-code behavior exactly.\n"
-        "- Return deployable PostgreSQL SQL only (no explanation).\n"
+        "- Return deployable PostgreSQL SQL only (no explanation, no markdown, no code fences).\n"
+        "- First non-whitespace token must be one of: SET, CREATE, DO, DROP.\n"
         "- Keep the existing procedure name and parameter list from the current converted SQL.\n"
         "- Replace shell notices with full executable logic.\n"
         "- Use PostgreSQL idioms (clock_timestamp, RETURNING, EXCEPTION blocks, etc.).\n"
@@ -58,8 +59,9 @@ def main() -> int:
 
         try:
             generated = try_foundry_generate(prompt, root)
-            if generated and "create" in generated.lower():
-                converted_path.write_text(generated.strip() + "\n", encoding="utf-8")
+            sql_text = _extract_sql_only(generated)
+            if _looks_like_deployable_sql(sql_text):
+                converted_path.write_text(sql_text.strip() + "\n", encoding="utf-8")
                 updated += 1
             else:
                 failed += 1

@@ -20,7 +20,40 @@ TECHNICAL_COLS = {
 
 
 def split_csv(text: str) -> list[str]:
-    return [x.strip() for x in text.replace("\r", "").replace("\n", " ").split(",") if x.strip()]
+    cleaned = text.replace("\r", " ").replace("\n", " ")
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    in_single_quote = False
+    i = 0
+    while i < len(cleaned):
+        ch = cleaned[i]
+        if ch == "'":
+            if in_single_quote and i + 1 < len(cleaned) and cleaned[i + 1] == "'":
+                current.append("''")
+                i += 2
+                continue
+            in_single_quote = not in_single_quote
+            current.append(ch)
+        elif not in_single_quote and ch == "(":
+            depth += 1
+            current.append(ch)
+        elif not in_single_quote and ch == ")":
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif not in_single_quote and depth == 0 and ch == ",":
+            item = "".join(current).strip()
+            if item:
+                parts.append(item)
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+
+    tail = "".join(current).strip()
+    if tail:
+        parts.append(tail)
+    return parts
 
 
 def to_bool_literals(sql: str) -> str:
@@ -31,6 +64,9 @@ def to_bool_literals(sql: str) -> str:
 
 def convert_expr(expr: str, proc_name: str | None = None) -> str:
     s = expr.strip()
+    if ";" in s:
+        s = s.split(";", 1)[0].strip()
+    s = re.sub(r"(?is)^\s*SET\s+@?[A-Za-z_][A-Za-z0-9_]*\s*=\s*SCOPE_IDENTITY\(\)\s*$", "target_id", s)
     if proc_name:
         s = re.sub(r"@([A-Za-z_][A-Za-z0-9_]*)", lambda m: f"{proc_name}.{m.group(1).lower()}", s)
     else:
@@ -40,6 +76,7 @@ def convert_expr(expr: str, proc_name: str | None = None) -> str:
     s = re.sub(r"\bnow\b", "now_ts", s, flags=re.IGNORECASE)
     s = re.sub(r"\bSYSDATETIME\(\)\b", "now_ts", s, flags=re.IGNORECASE)
     s = re.sub(r"\bGETDATE\(\)\b", "now_ts", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bGETUTCDATE\(\)\b", "now_ts", s, flags=re.IGNORECASE)
     s = re.sub(r"\bSCOPE_IDENTITY\(\)\b", "target_id", s, flags=re.IGNORECASE)
     s = to_bool_literals(s)
     return s
@@ -64,25 +101,27 @@ def parse_source(source_sql: str):
     if not m_table:
         m_table = re.search(r"FROM\s+(?:dbo\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\n\s*WHERE\s+IsDeleted\s*=\s*0", normalized, flags=re.IGNORECASE)
     if not m_table:
-        return None
+        return parse_source_mode_b(normalized)
     table = m_table.group(1)
 
     m_pk = re.search(r"SELECT\s+@Target\w+\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s+FROM\s+(?:dbo\.)?" + re.escape(table), normalized, flags=re.IGNORECASE)
     if not m_pk:
-        return None
+        return parse_source_mode_b(normalized)
     pk_col = m_pk.group(1)
 
-    m_insert = re.search(
-        r"INSERT\s+INTO\s+(?:dbo\.)?" + re.escape(table) + r"\s*\((.*?)\)\s*VALUES\s*\((.*?)\)\s*;?",
+    insert_branch = re.search(
+        r"IF\s+UPPER\(@ActionType\)\s*=\s*'INSERT'\s*BEGIN(.*?)ELSE\s+IF\s+UPPER\(@ActionType\)\s*=\s*'UPDATE'",
         normalized,
         flags=re.IGNORECASE | re.DOTALL,
     )
-    if not m_insert:
-        return None
-    insert_cols = split_csv(m_insert.group(1))
-    insert_vals = split_csv(m_insert.group(2))
+    insert_search_space = insert_branch.group(1) if insert_branch else normalized
+
+    insert_parts = extract_insert_parts(insert_search_space, table)
+    if not insert_parts:
+        return parse_source_mode_b(normalized)
+    insert_cols, insert_vals = insert_parts
     if len(insert_cols) != len(insert_vals):
-        return None
+        return parse_source_mode_b(normalized)
 
     update_branch = re.search(
         r"ELSE\s+IF\s+UPPER\(@ActionType\)\s*=\s*'UPDATE'\s*BEGIN(.*?)ELSE\s+IF\s+UPPER\(@ActionType\)\s*=\s*'DELETE'",
@@ -122,6 +161,141 @@ def parse_source(source_sql: str):
     }
 
 
+def parse_source_mode_b(normalized_sql: str):
+    insert_branch = re.search(
+        r"IF\s+@ActionType\s*=\s*'INSERT'\s*BEGIN(.*?)ELSE\s+IF\s+@ActionType\s*=\s*'UPDATE'",
+        normalized_sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    insert_search_space = insert_branch.group(1) if insert_branch else normalized_sql
+
+    m_insert = re.search(
+        r"INSERT\s+INTO\s+(?:dbo\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        insert_search_space,
+        flags=re.IGNORECASE,
+    )
+    if not m_insert:
+        return None
+
+    table = m_insert.group(1)
+    insert_parts = extract_insert_parts(insert_search_space, table)
+    if not insert_parts:
+        return None
+    insert_cols, insert_vals = insert_parts
+    if len(insert_cols) != len(insert_vals):
+        return None
+
+    update_set = ""
+    pk_col = None
+
+    update_branch = re.search(
+        r"ELSE\s+IF\s+UPPER\(@ActionType\)\s*=\s*'UPDATE'\s*BEGIN(.*?)ELSE\s+IF\s+UPPER\(@ActionType\)\s*=\s*'DELETE'",
+        normalized_sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    update_space = update_branch.group(1) if update_branch else normalized_sql
+
+    m_update = re.search(
+        r"UPDATE\s+(?:dbo\.)?" + re.escape(table) + r"\s*\n\s*SET\s*(.*?)\n\s*WHERE\s+(.*?)\s*;",
+        update_space,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if m_update:
+        update_set = m_update.group(1).strip()
+        where_expr = m_update.group(2)
+        m_pk_from_where = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*@([A-Za-z_][A-Za-z0-9_]*)\b", where_expr, flags=re.IGNORECASE)
+        if m_pk_from_where:
+            pk_col = m_pk_from_where.group(1)
+
+    if not pk_col:
+        delete_branch = re.search(
+            r"ELSE\s+IF\s+UPPER\(@ActionType\)\s*=\s*'DELETE'\s*BEGIN(.*?)(?:ELSE|END\s*TRY|END)\b",
+            normalized_sql,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        delete_space = delete_branch.group(1) if delete_branch else normalized_sql
+        m_delete_where = re.search(
+            r"UPDATE\s+(?:dbo\.)?" + re.escape(table) + r"\s*\n\s*SET\s*.*?\n\s*WHERE\s+(.*?)\s*;",
+            delete_space,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if m_delete_where:
+            m_pk_from_delete = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*@([A-Za-z_][A-Za-z0-9_]*)\b", m_delete_where.group(1), flags=re.IGNORECASE)
+            if m_pk_from_delete:
+                pk_col = m_pk_from_delete.group(1)
+
+    if not pk_col:
+        pk_candidates = [c for c in insert_cols if c.lower().endswith("id") and c.lower() not in {"entityid"}]
+        if pk_candidates:
+            pk_col = pk_candidates[0]
+        else:
+            return None
+
+    return {
+        "table": table,
+        "pk_col": pk_col,
+        "insert_cols": insert_cols,
+        "insert_vals": insert_vals,
+        "update_set": update_set,
+        "dup_conditions": [],
+    }
+
+
+def extract_insert_parts(sql_text: str, table: str) -> tuple[list[str], list[str]] | None:
+    m = re.search(r"INSERT\s+INTO\s+(?:dbo\.)?" + re.escape(table) + r"\s*\(", sql_text, flags=re.IGNORECASE)
+    if not m:
+        return None
+
+    cols_open_idx = sql_text.find("(", m.start())
+    if cols_open_idx < 0:
+        return None
+
+    def read_balanced(text: str, open_idx: int) -> tuple[str, int] | None:
+        depth = 0
+        in_single_quote = False
+        i = open_idx
+        while i < len(text):
+            ch = text[i]
+            if ch == "'":
+                if in_single_quote and i + 1 < len(text) and text[i + 1] == "'":
+                    i += 2
+                    continue
+                in_single_quote = not in_single_quote
+            elif not in_single_quote and ch == "(":
+                depth += 1
+            elif not in_single_quote and ch == ")":
+                depth -= 1
+                if depth == 0:
+                    return text[open_idx + 1 : i], i
+            i += 1
+        return None
+
+    cols_parsed = read_balanced(sql_text, cols_open_idx)
+    if not cols_parsed:
+        return None
+    cols_blob, cols_close_idx = cols_parsed
+
+    m_values = re.search(r"\bVALUES\b", sql_text[cols_close_idx + 1 :], flags=re.IGNORECASE)
+    if not m_values:
+        return None
+    values_keyword_idx = cols_close_idx + 1 + m_values.start()
+
+    vals_open_idx = sql_text.find("(", values_keyword_idx)
+    if vals_open_idx < 0:
+        return None
+
+    vals_parsed = read_balanced(sql_text, vals_open_idx)
+    if not vals_parsed:
+        return None
+    vals_blob, _ = vals_parsed
+
+    insert_cols = split_csv(cols_blob)
+    insert_vals = split_csv(vals_blob)
+    if not insert_cols or not insert_vals:
+        return None
+    return insert_cols, insert_vals
+
+
 def build_logic_block(meta: dict, param_names: set[str]) -> str:
     table = meta["table"].lower()
     pk_col = meta["pk_col"].lower()
@@ -132,6 +306,10 @@ def build_logic_block(meta: dict, param_names: set[str]) -> str:
             pk_param = id_like[0]
 
     proc_name = "upsert_" + table
+    has_resultcode = "resultcode" in param_names
+
+    def rc(value: str) -> str:
+        return f"resultcode := {value};" if has_resultcode else "NULL;"
 
     now_decl = "DECLARE\n    now_ts timestamp := clock_timestamp();\n    target_id integer := NULL;\n    normalized_action text := upper(coalesce(actiontype, ''));"
 
@@ -186,7 +364,7 @@ BEGIN
         LIMIT 1;
 
         IF target_id IS NOT NULL THEN
-            resultcode := -1;
+            {rc('-1')}
         ELSE
             SELECT t.{pk_col}
             INTO target_id
@@ -207,20 +385,27 @@ BEGIN
                     deletedat = NULL
                 WHERE {pk_col} = target_id;
 
-                resultcode := 2;
+                {rc('2')}
             ELSE
-                INSERT INTO dbo.{table} AS ins
+                INSERT INTO dbo.{table}
                     ({insert_cols})
-                VALUES ({insert_vals})
-                RETURNING ins.{pk_col} INTO target_id;
+                VALUES ({insert_vals});
 
-                resultcode := 0;
+                SELECT t.{pk_col}
+                INTO target_id
+                FROM dbo.{table} t
+                WHERE t.isdeleted = false
+                  AND {where_business}
+                ORDER BY t.{pk_col} DESC
+                LIMIT 1;
+
+                {rc('0')}
             END IF;
         END IF;
 
     ELSIF normalized_action = 'UPDATE' THEN
         IF {pk_param} IS NULL THEN
-            resultcode := -30;
+            {rc('-30')}
             RETURN;
         END IF;
 
@@ -232,18 +417,18 @@ BEGIN
         LIMIT 1;
 
         IF target_id IS NULL THEN
-            resultcode := -20;
+            {rc('-20')}
         ELSE
             UPDATE dbo.{table} AS u
             SET {update_set}
             WHERE u.{pk_col} = {proc_name}.{pk_param};
 
-            resultcode := 1;
+            {rc('1')}
         END IF;
 
     ELSIF normalized_action = 'DELETE' THEN
         IF {pk_param} IS NULL THEN
-            resultcode := -30;
+            {rc('-30')}
             RETURN;
         END IF;
 
@@ -255,7 +440,7 @@ BEGIN
         LIMIT 1;
 
         IF target_id IS NULL THEN
-            resultcode := -20;
+            {rc('-20')}
         ELSE
             UPDATE dbo.{table} AS u
             SET isdeleted = true,
@@ -267,16 +452,16 @@ BEGIN
                 deletedat = now_ts
             WHERE u.{pk_col} = {proc_name}.{pk_param};
 
-            resultcode := 3;
+            {rc('3')}
         END IF;
 
     ELSE
-        resultcode := -9;
+        {rc('-9')}
     END IF;
 
 EXCEPTION
     WHEN OTHERS THEN
-        resultcode := -9;
+        {rc('-9')}
         RAISE;
 END;"""
 
@@ -362,6 +547,9 @@ def main() -> int:
         parse_failures_path.unlink()
 
     summary = (
+        "scope=upsert_shell_parser_only\n"
+        "note=This file reports deterministic Upsert parser conversion only; it does not include PostgreSQL apply failures.\n"
+        "apply_failures_file=artifacts/object_apply_failures.csv\n"
         f"updated={updated}\n"
         f"skipped={skipped}\n"
         f"parse_failures={len(parse_failures_sorted)}\n"

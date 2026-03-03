@@ -28,6 +28,40 @@ if ($rows.Count -eq 0) {
     exit 0
 }
 
+$rootDirEscaped = [Regex]::Escape($rootDir)
+$upsertRows = @($rows | Where-Object {
+    $_.file_path -match 'artifacts[\\/]converted_objects[\\/]procedures[\\/]dbo\.Upsert_.*\.sql$'
+})
+
+if ($upsertRows.Count -gt 0) {
+    $upsertNames = @($upsertRows | ForEach-Object {
+        [System.IO.Path]::GetFileName($_.file_path)
+    }) | Select-Object -Unique
+
+    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+        throw 'python is required for deterministic Upsert repair.'
+    }
+
+    $filesArg = [string]::Join(',', $upsertNames)
+    Write-Host "Running deterministic Upsert repair on $($upsertNames.Count) failed procedures..." -ForegroundColor Yellow
+    python "$scriptDir\bulk_convert_upsert_shells.py" --root "$rootDir" --force --files "$filesArg"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Deterministic Upsert repair failed.'
+    }
+
+    Write-Host 'Re-applying after deterministic Upsert repair...' -ForegroundColor Yellow
+    & "$scriptDir\07-apply-converted-objects.ps1" -RetryKnownFailures
+
+    if (Test-Path $failCsv) {
+        $rows = Import-Csv $failCsv
+    }
+
+    if ($rows.Count -eq 0) {
+        Write-Host 'All failures resolved by deterministic Upsert repair.' -ForegroundColor Green
+        exit 0
+    }
+}
+
 if ($Mode -eq 'Chat') {
     $lines = @()
     $lines += '# Manual Enhancement Queue'
